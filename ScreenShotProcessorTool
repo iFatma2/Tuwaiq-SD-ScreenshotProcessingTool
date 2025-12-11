@@ -1,0 +1,123 @@
+
+using System;
+using System.Diagnostics;
+using System.IO;
+using System.IO.Compression;
+using SkiaSharp;
+
+class Program
+{
+    static int Main(string[] args)
+    {
+        try
+        {
+            // 1) Temp directory and paths
+            string tempDir = Path.Combine(Path.GetTempPath(), "screenshot_tool_temp");
+            Directory.CreateDirectory(tempDir);
+            string tmpPng = Path.Combine(tempDir, "screenshot.png");
+
+            // 2) Capture screenshot silently using macOS 'screencapture'
+            var psi = new ProcessStartInfo
+            {
+                FileName = "/usr/sbin/screencapture",
+                Arguments = $"-x \"{tmpPng}\"",
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true
+            };
+
+            using (var process = Process.Start(psi))
+            {
+                process.WaitForExit();
+                if (process.ExitCode != 0)
+                {
+                    string err = process.StandardError.ReadToEnd();
+                    Console.Error.WriteLine("screencapture failed: " + err);
+                    return 2;
+                }
+            }
+
+            if (!File.Exists(tmpPng))
+            {
+                Console.Error.WriteLine("Screenshot was not created. Make sure screen recording is allowed in Privacy settings.");
+                return 3;
+            }
+
+            // 3) Load image using SkiaSharp
+            using var input = File.OpenRead(tmpPng);
+            using var original = SKBitmap.Decode(input);
+
+            if (original == null)
+            {
+                Console.Error.WriteLine("Failed to read image.");
+                return 4;
+            }
+
+            int width = original.Width;
+            int height = original.Height;
+
+            // 4) Process: grayscale + horizontal flip
+            using var processed = new SKBitmap(width, height, original.ColorType, original.AlphaType);
+
+            for (int y = 0; y < height; y++)
+            {
+                for (int x = 0; x < width; x++)
+                {
+                    var pixel = original.GetPixel(x, y);
+
+                    byte gray = (byte)Math.Clamp(
+                        (int)(0.299f * pixel.Red + 0.587f * pixel.Green + 0.114f * pixel.Blue),
+                        0, 255
+                    );
+
+                    processed.SetPixel(
+                        width - 1 - x,
+                        y,
+                        new SKColor(gray, gray, gray, pixel.Alpha)
+                    );
+                }
+            }
+
+            // 5) Save processed image to Desktop
+            string desktop = Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory);
+
+            if (string.IsNullOrEmpty(desktop))
+                desktop = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+
+            string outPng = Path.Combine(desktop, $"screenshot_bw_flipped_{DateTime.Now:yyyyMMdd_HHmmss}.png");
+
+            using (var outStream = File.OpenWrite(outPng))
+            {
+                processed.Encode(outStream, SKEncodedImageFormat.Png, 90);
+            }
+
+            // 6) Create ZIP file on Desktop
+            string zipPath = Path.Combine(desktop, $"screenshot_{DateTime.Now:yyyyMMdd_HHmmss}.zip");
+
+            using (var zipFs = File.Open(zipPath, FileMode.Create))
+            using (var archive = new ZipArchive(zipFs, ZipArchiveMode.Create))
+            {
+                var entry = archive.CreateEntry(Path.GetFileName(outPng), CompressionLevel.Optimal);
+                using var entryStream = entry.Open();
+                using var fileStream = File.OpenRead(outPng);
+                fileStream.CopyTo(entryStream);
+            }
+
+            // 7) Clean up temp folder
+            try { Directory.Delete(tempDir, true); } catch { }
+
+            Console.WriteLine("Saved on Desktop:");
+            Console.WriteLine(" - Image: " + outPng);
+            Console.WriteLine(" - ZIP File: " + zipPath);
+
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine("Error: " + ex.Message);
+            Console.Error.WriteLine(ex.StackTrace);
+            return 1;
+        }
+    }
+}
